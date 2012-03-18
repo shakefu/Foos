@@ -2,13 +2,15 @@
 The Foosball App
 
 """
+import json
+import functools
 from datetime import datetime
 
 import bson
 import bottle
 import static
 from minimongo import Model
-from bottle import request, template, redirect
+from bottle import request, response, template, redirect
 
 # Direct call to bottle's helper function to avoid false import errors
 get = bottle.make_default_app_wrapper('get')
@@ -19,10 +21,22 @@ post = bottle.make_default_app_wrapper('post')
 ############
 
 DATABASE = 'foos'
+STATIC_MOUNT = '/static/'
+API_MOUNT = '/api/v1/json'
+
+
+##############
+# Exceptions #
+##############
+
+class FoosException(Exception):
+    """ Base Exception for all Foos Exceptions. """
 
 ##########
 # Models #
 ##########
+class BaseModelException(FoosException):
+    """ Base exception for models. """
 
 class ModelMixin(object):
     """ Common methods for minimongo :class:`Model` subclasses. """
@@ -89,6 +103,13 @@ class Player(ModelMixin, Model):
         super(Player, self).__init__(*args, **kwargs)
 
     @classmethod
+    def fetch(cls, _id):
+        player = cls.one(_id=_id)
+        if not player:
+            raise cls.Error("Who're you looking for?")
+        return player
+
+    @classmethod
     def exists(cls, name):
         """ Check if a player already exists with the given name.
 
@@ -123,6 +144,7 @@ class Player(ModelMixin, Model):
 
             :param str name: Player's name. Must be unique. Must be less than \
                  25 characters.
+            :returns: Player instance created.
 
         """
         if cls.valid_name(name):
@@ -165,7 +187,7 @@ class Player(ModelMixin, Model):
         """ Returns the stat string. """
         return "(%s-%s-%s)" % (self.wins, self.losses, self.incomplete)
 
-    class Error(Exception):
+    class Error(BaseModelException):
         """ Base Error class for a Player. """
         pass
 
@@ -192,6 +214,13 @@ class Game(ModelMixin, Model):
         super(Game, self).__init__(*args, **kwargs)
 
     @classmethod
+    def fetch(cls, _id):
+        game = cls.one(_id=_id)
+        if not game:
+            raise cls.Error("Which game are you looking for?")
+        return game
+
+    @classmethod
     def begin(cls, players):
         """ Starts a game. """
         if not players:
@@ -200,9 +229,11 @@ class Game(ModelMixin, Model):
             raise cls.Error("Playing with yourself?")
         if len(players) > 2:
             raise cls.Error("Only two at a time!")
+        if Player.find(players, cursor=True).count() != 2:
+            raise cls.Error("One or more players aren't really players.")
         return cls(
                 players=players,
-                scores=dict(zip(players, [0, 0, 0, 0]))
+                scores=dict(zip(players, (0, 0)))
                 ).save()
 
     @classmethod
@@ -210,9 +241,7 @@ class Game(ModelMixin, Model):
         """ Records a score. """
         if not scorer:
             raise cls.Error("Who scored?")
-        game = cls.one(_id=game)
-        if not game:
-            raise cls.Error("What game are you playing?")
+        game = game.fetch(game)
         if game.end:
             raise cls.GameOver("That game's already over.")
         if scorer == 'nobody':
@@ -260,9 +289,7 @@ class Game(ModelMixin, Model):
     @classmethod
     def abort(cls, game):
         """ Ends a game as incomplete. """
-        game = Game.one(_id=game)
-        if not game:
-            raise cls.Error("Which game are you trying to end?")
+        game = Game.fetch(game)
         if game.end:
             raise cls.Error("Games can't end twice.")
         game.winner = game.players[0]
@@ -331,7 +358,7 @@ class Game(ModelMixin, Model):
         """ Return the offset for a timestamp from the start of the game. """
         return timestamp - self.start
 
-    class Error(Exception):
+    class Error(BaseModelException):
         """ Base class for Game exceptions. """
         pass
 
@@ -348,9 +375,11 @@ def format_timedelta(stamp):
     """ Strip fractional seconds from a timestamp. """
     return str(stamp).split('.')[0]
 
+
 def http_referer():
     """ Return the referrer to the current page. """
     return request.environ.get('HTTP_REFERER', '/?default')
+
 
 def base_context():
     """ Create a base context dictionary. """
@@ -369,6 +398,66 @@ def error_template(*args, **kwargs):
         context.update(dict(zip((_[0] for _ in defaults), args)))
     context.update(kwargs)
     return template('error', context)
+
+
+def error_json(*args, **kwargs):
+    """ Returns an error message as JSON. """
+    defaults = (('error', "Check back later, maybe I'll fix this."),)
+    obj = {}
+    obj.update(dict(defaults))
+    if args:
+        obj.update(dict(zip((_[0] for _ in defaults), args)))
+    obj.update(kwargs)
+    return json.dumps(obj)
+
+
+def validate(data, validator):
+    """ Validates a value. """
+    try:
+        return validator(data)
+    except ValueError:
+        raise FoosException("Bad value for '%s'." % key)
+
+
+def as_json(obj, set_content_type=True):
+    """ Wrapper around json.dumps. """
+    if set_content_type:
+        response.content_type = 'text'
+        # response.content_type = 'text/json' # Causes downloads
+
+    class _encoder(json.JSONEncoder):
+        def default(self, _obj):
+            if hasattr(_obj, 'isoformat'):
+                return _obj.isoformat()
+            if isinstance(_obj, bson.ObjectId):
+                return str(_obj)
+            return json.JSONEncoder.default(self, _obj)
+
+    return json.dumps(obj, cls=_encoder)
+
+
+def catch_json(func):
+    """ Catches FoosException errors and returns a pretty JSON message. """
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except FoosException, exc:
+            return error_json(exc.message)
+
+    return wrapped
+
+
+def catch_template(func):
+    """ Catches FoosException errors and returns a pretty error template. """
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except FoosException, exc:
+            return error_template(exc.message)
+
+    return wrapped
 
 
 ###############
@@ -395,45 +484,38 @@ def new_game():
 
 
 @post('/new_game')
+@catch_template
 def start_game():
     """ Begins a game. """
-    try:
-        game = Game.begin(request.POST.dict.get('players', None))
-    except Game.Error, exc:
-        return error_template(exc.message)
+    game = Game.begin(request.POST.dict.get('players', None))
     redirect('/game/%s' % game['_id'])
 
 
 @get('/game/<game>')
+@catch_template
 def show_game(game):
     """ Display a game. """
-    game = Game.one(_id=game)
-    if not game:
-        return error_template("Which game are you looking for?")
+    game = Game.fetch(game)
     context = base_context()
     context['game'] = game
     return template('game', context)
 
 
 @post('/game/<game>')
+@catch_template
 def play_game(game):
     """ Record a score. """
-    try:
-        game = Game.play(game, request.POST.scorer)
-    except Game.Error, exc:
-        return error_template(exc.message)
+    game = Game.play(game, request.POST.scorer)
     context = base_context()
     context['game'] = game
     return template('game', context)
 
 
 @post('/game/<game>/end')
+@catch_template
 def end_game(game):
     """ End a game prematurely. """
-    try:
-        game = Game.abort(game)
-    except Game.Error, exc:
-        return error_template(exc.message)
+    game = Game.abort(game)
     return redirect(game.url)
 
 
@@ -453,21 +535,18 @@ def new_player():
 
 
 @post('/new_player')
+@catch_template
 def create_player():
     """ Creates a new player. """
-    try:
-        Player.create(request.POST.name)
-    except Player.Error, exc:
-        return error_template(exc.message)
+    Player.create(request.POST.name)
     return redirect('/')
 
 
 @get('/player/<player>')
+@catch_template
 def show_player(player):
     """ Show an individual player. """
-    player = Player.one(_id=player)
-    if not player:
-        return error_template("Who are you looking for?")
+    player = Player.fetch(player)
     context = base_context()
     context['player'] = player
     context['recent_games'] = player.recent_games()
@@ -483,16 +562,131 @@ def show_players():
     return template('players', context)
 
 
+#######
+# API #
+#######
+
+# Push default app stack to create new JSON API app
+bottle.default_app.push()
+
+
+# Player API methods #
+@get('/')
+def api_description():
+    return as_json({
+        'version':1.0,
+        'GET': {
+            '/player/exists': 'name',
+            '/player/valid_name': 'name',
+            '/players': '',
+            '/player/<player>': '',
+            '/player/<player>/recent/<count>': '',
+            '/game/<game>': '',
+            },
+        'POST': {
+            '/player/create': 'name',
+            '/player/<player>/rename': 'name',
+            '/game/begin': ['player', 'player'],
+            '/game/<game>/score/<scorer>': '',
+            '/game/<game>/abort': '',
+            },
+        })
+
+
+@get('/player/exists')
+def api_player_exists():
+    return as_json({'exists': Player.exists(request.GET.name)})
+
+
+@get('/player/valid_name')
+@catch_json
+def api_valid_name():
+    return as_json({'valid': Player.valid_name(request.GET.name)})
+
+
+@post('/player/create')
+@catch_json
+def api_create_player():
+    return as_json({'player': str(Player.create(request.POST.name))})
+
+
+@post('/player/<player>/rename')
+@catch_json
+def api_player_rename(player):
+    return as_json(Player.fetch(player).rename(request.POST.name))
+
+
+@get('/players')
+def api_list_players():
+    players = Player.find()
+    return as_json(players)
+
+
+@get('/player/<player>')
+@catch_json
+def get_player(player):
+    player = Player.fetch(player)
+    return as_json(player)
+
+
+@get('/player/<player>/recent/<count>')
+@catch_json
+def api_player_recent_games(player, count):
+    count = validate(count, int)
+    player = Player.fetch(player)
+    games = player.recent_games(int(count))
+    return as_json(games)
+
+
+# Game API methods #
+@get('/game/<game>')
+@catch_json
+def api_game(game):
+    return as_json(Game.fetch(game))
+
+
+@get('/games/<count>')
+@catch_json
+def api_recent_games(count):
+    count = validate(count, int)
+    return as_json(Game.recent_games(count))
+
+
+@post('/game/begin')
+@catch_json
+def api_game_begin():
+    return as_json(Game.begin(request.POST.dict.get('players', None)))
+
+
+@post('/game/<game>/score/<scorer>')
+@catch_json
+def api_game_play(game, scorer):
+    return as_json(Game.play(game, scorer))
+
+
+@post('/game/<game>/abort')
+@catch_json
+def api_game_abort(game):
+    return as_json(Game.abort(game))
+
+
+# Retrieve JSON API app to mount
+json_api_app = bottle.default_app.pop()
+
+
 ########
 # WSGI #
 ########
 
-def make_app(serve_static=True):
+def make_app(serve_static=True, json_api=True):
     """ Builds the WSGI app. """
     foos_app = bottle.default_app()
 
     if serve_static:
-        foos_app.mount('/static/', static.Cling('./static'))
+        foos_app.mount(STATIC_MOUNT, static.Cling('./static'))
+
+    if json_api:
+        foos_app.mount(API_MOUNT, json_api_app)
 
     return foos_app
 
