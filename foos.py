@@ -24,7 +24,6 @@ DATABASE = 'foos'
 STATIC_MOUNT = '/static/'
 API_MOUNT = '/api/v1/json'
 
-
 ##############
 # Exceptions #
 ##############
@@ -35,6 +34,7 @@ class FoosException(Exception):
 ##########
 # Models #
 ##########
+
 class BaseModelException(FoosException):
     """ Base exception for models. """
 
@@ -104,6 +104,13 @@ class Player(ModelMixin, Model):
 
     @classmethod
     def fetch(cls, _id):
+        """ Fetches a player by id.
+
+            :param _id: Player._id to look up.
+            :returns: Player if found.
+            :raises: Player.Error if not found.
+
+        """
         player = cls.one(_id=_id)
         if not player:
             raise cls.Error("Who're you looking for?")
@@ -215,6 +222,13 @@ class Game(ModelMixin, Model):
 
     @classmethod
     def fetch(cls, _id):
+        """ Fetches a game by id.
+
+            :param _id: Game._id to look up.
+            :returns: Game if found.
+            :raises: Game.Error if not found.
+
+        """
         game = cls.one(_id=_id)
         if not game:
             raise cls.Error("Which game are you looking for?")
@@ -416,7 +430,7 @@ def validate(data, validator):
     try:
         return validator(data)
     except ValueError:
-        raise FoosException("Bad value for '%s'." % key)
+        raise FoosException("Invalid parameter.")
 
 
 def as_json(obj, set_content_type=True):
@@ -426,7 +440,9 @@ def as_json(obj, set_content_type=True):
         # response.content_type = 'text/json' # Causes downloads
 
     class _encoder(json.JSONEncoder):
+        """ Encoder helper class for datetimes and ObjectIds."""
         def default(self, _obj):
+            """ Handles datetime and ObjectId instances. """
             if hasattr(_obj, 'isoformat'):
                 return _obj.isoformat()
             if isinstance(_obj, bson.ObjectId):
@@ -440,6 +456,7 @@ def catch_json(func):
     """ Catches FoosException errors and returns a pretty JSON message. """
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
+        """ Wrapper function. """
         try:
             return func(*args, **kwargs)
         except FoosException, exc:
@@ -452,6 +469,7 @@ def catch_template(func):
     """ Catches FoosException errors and returns a pretty error template. """
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
+        """ Wrapper function. """
         try:
             return func(*args, **kwargs)
         except FoosException, exc:
@@ -573,58 +591,91 @@ bottle.default_app.push()
 # Player API methods #
 @get('/')
 def api_description():
+    """ Returns a description of API calls. """
     return as_json({
-        'version':1.0,
         'GET': {
-            '/player/exists': 'name',
-            '/player/valid_name': 'name',
-            '/players': '',
-            '/player/<player>': '',
-            '/player/<player>/recent/<count>': '',
-            '/game/<game>': '',
+            '/player/exists': {
+                'param': 'name',
+                'description': api_player_exists.__doc__,
+                },
+            '/player/valid_name': {
+                'param': 'name',
+                'description': api_valid_name.__doc__,
+                },
+            '/players': {
+                'description': api_list_players.__doc__,
+                },
+            '/player/<player>': {
+                'description': api_get_player.__doc__,
+                },
+            '/player/<player>/recent/<count>': {
+                'description': api_player_recent_games.__doc__,
+                },
+            '/game/<game>': {
+                'description': api_game.__doc__,
+                },
             },
         'POST': {
-            '/player/create': 'name',
-            '/player/<player>/rename': 'name',
-            '/game/begin': ['player', 'player'],
-            '/game/<game>/score/<scorer>': '',
-            '/game/<game>/abort': '',
+            '/player/create': {
+                'param': 'name',
+                'description': api_create_player.__doc__,
+                },
+            '/player/<player>/rename': {
+                'param': 'name',
+                'description': api_player_rename.__doc__,
+                },
+            '/game/begin': {
+                'params': ['player', 'player'],
+                'description': api_game_begin.__doc__,
+                },
+            '/game/<game>/score/<scorer>': {
+                'description': api_game_play.__doc__,
+                },
+            '/game/<game>/abort': {
+                'description': api_game_abort.__doc__,
+                },
             },
         })
 
 
 @get('/player/exists')
 def api_player_exists():
+    """ Check if a player with a given name exists. """
     return as_json({'exists': Player.exists(request.GET.name)})
 
 
 @get('/player/valid_name')
 @catch_json
 def api_valid_name():
+    """ Validates a name. """
     return as_json({'valid': Player.valid_name(request.GET.name)})
 
 
 @post('/player/create')
 @catch_json
 def api_create_player():
+    """ Creates a player. """
     return as_json({'player': str(Player.create(request.POST.name))})
 
 
 @post('/player/<player>/rename')
 @catch_json
 def api_player_rename(player):
+    """ Renames a player. """
     return as_json(Player.fetch(player).rename(request.POST.name))
 
 
 @get('/players')
 def api_list_players():
+    """ Lists all players. """
     players = Player.find()
     return as_json(players)
 
 
 @get('/player/<player>')
 @catch_json
-def get_player(player):
+def api_get_player(player):
+    """ Returns a specific player. """
     player = Player.fetch(player)
     return as_json(player)
 
@@ -632,6 +683,7 @@ def get_player(player):
 @get('/player/<player>/recent/<count>')
 @catch_json
 def api_player_recent_games(player, count):
+    """ Returns `count` recent games for a player. """
     count = validate(count, int)
     player = Player.fetch(player)
     games = player.recent_games(int(count))
@@ -642,12 +694,14 @@ def api_player_recent_games(player, count):
 @get('/game/<game>')
 @catch_json
 def api_game(game):
+    """ Returns a game. """
     return as_json(Game.fetch(game))
 
 
 @get('/games/<count>')
 @catch_json
 def api_recent_games(count):
+    """ Returns `count` recent games played. """
     count = validate(count, int)
     return as_json(Game.recent_games(count))
 
@@ -655,18 +709,21 @@ def api_recent_games(count):
 @post('/game/begin')
 @catch_json
 def api_game_begin():
+    """ Begins a new game. """
     return as_json(Game.begin(request.POST.dict.get('players', None)))
 
 
 @post('/game/<game>/score/<scorer>')
 @catch_json
 def api_game_play(game, scorer):
+    """ Records a game score. """
     return as_json(Game.play(game, scorer))
 
 
 @post('/game/<game>/abort')
 @catch_json
 def api_game_abort(game):
+    """ Aborts a game in progress. """
     return as_json(Game.abort(game))
 
 
