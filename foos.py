@@ -100,6 +100,7 @@ class Player(ModelMixin, Model):
         self.points_for = 0
         self.points_against = 0
         self.playtime = 0
+        self.last_played = None
         super(Player, self).__init__(*args, **kwargs)
 
     @classmethod
@@ -286,6 +287,7 @@ class Game(ModelMixin, Model):
         loser.playtime += playtime
         loser.games += 1
         loser.losses += 1
+        loser.last_played = game.end
 
         winner = game.player(game.winner)
         winner.points_for += game.scores[game.winner]
@@ -293,6 +295,7 @@ class Game(ModelMixin, Model):
         winner.playtime += playtime
         winner.games += 1
         winner.wins += 1
+        winner.last_played = game.end
 
         game = game.save()
         loser.save()
@@ -497,7 +500,7 @@ def new_game():
     """ Selecting players for a new game. """
     players = Player.find()
     context = base_context()
-    context['players'] = players
+    context['players'] = sorted(players, key=lambda p: p.last_played)
     return template('new_game', context)
 
 
@@ -576,7 +579,7 @@ def show_players():
     """ List players. """
     players = Player.find()
     context = base_context()
-    context['players'] = sorted(players, key=lambda p: p.name)
+    context['players'] = sorted(players, key=lambda p: -1000 * p.win_percent)
     return template('players', context)
 
 
