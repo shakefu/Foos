@@ -182,6 +182,8 @@ class Player(ModelMixin, Model):
     @property
     def win_percent(self):
         """ Percentage of wins. """
+        if not self.games:
+            return 0.0
         return round(1.0 * self.wins / self.games, 3)
 
     @property
